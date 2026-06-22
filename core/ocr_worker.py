@@ -8,9 +8,11 @@ smoothing, and forwards validated lat/lon telemetry to PipelineManager.
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 import cv2
@@ -20,6 +22,25 @@ from core.telemetry_parser import parse_telemetry
 
 if TYPE_CHECKING:
     from api.pipeline import PipelineManager
+
+
+def _easyocr_model_dir() -> str:
+    """
+    Return the EasyOCR model directory.
+
+    Dev mode  → project root / easyocr_models   (populated by prepare_models.py)
+    Frozen    → sys._MEIPASS / easyocr_models    (bundled by PyInstaller spec)
+
+    If the directory does not exist, returns None so EasyOCR falls back to its
+    default ~/.EasyOCR/model/ and downloads on first use.
+    """
+    if getattr(sys, 'frozen', False):
+        base = Path(sys._MEIPASS)
+    else:
+        base = Path(__file__).parent.parent
+    d = base / 'easyocr_models'
+    return str(d) if d.is_dir() else None
+
 
 # ── ROI configuration ─────────────────────────────────────────────────────────
 _TELE_ROIS = [
@@ -34,6 +55,10 @@ _MAX_DRAIN        = 200    # cap buffered-frame drain; prevents OCR stall after 
 # ── OCR ───────────────────────────────────────────────────────────────────────
 _MIN_CONFIDENCE    = 0.20
 _LON_LAT_ALLOWLIST = '0123456789. LONATlonat'
+# CRAFT (text detector) runs every Nth OCR cycle; CRNN (recognizer) runs every cycle.
+# OSD bounding-box positions are fixed frame-to-frame — only digit values change —
+# so caching the boxes saves ~1.2 s of CRAFT compute on cache-hit frames.
+_CRAFT_INTERVAL   = 5
 
 # ── Sanity filter ─────────────────────────────────────────────────────────────
 _FIELD_RANGES: dict[str, tuple[float, float]] = {
@@ -116,6 +141,9 @@ class OcrWorker:
             k: deque(maxlen=_REJECT_RESET) for k in _FIELD_RANGES
         }
         self._last_pushed: Optional[dict] = None
+        # CRAFT bbox cache — populated on first frame and every _CRAFT_INTERVAL frames
+        self._bbox_cache: Optional[tuple] = None   # (h_list, f_list)
+        self._bbox_age:   int             = 0      # frames since last CRAFT run
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -141,6 +169,8 @@ class OcrWorker:
         self._consec_rejects = {k: 0    for k in _FIELD_RANGES}
         self._rejected_vals  = {k: deque(maxlen=_REJECT_RESET) for k in _FIELD_RANGES}
         self._last_pushed    = None
+        self._bbox_cache     = None
+        self._bbox_age       = 0
 
     # ── Worker thread ─────────────────────────────────────────────────────────
 
@@ -154,13 +184,16 @@ class OcrWorker:
         torch.set_num_threads(4)
         torch.set_num_interop_threads(1)
 
+        model_dir = _easyocr_model_dir()
+        model_kwargs = {"model_storage_directory": model_dir} if model_dir else {}
+
         print("[ocr-worker] Loading EasyOCR model…")
         t0 = time.perf_counter()
         try:
-            reader = easyocr.Reader(["en"], gpu=True, verbose=False)
+            reader = easyocr.Reader(["en"], gpu=True, verbose=False, **model_kwargs)
             print(f"[ocr-worker] EasyOCR ready (GPU) in {time.perf_counter()-t0:.1f}s")
         except Exception:
-            reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+            reader = easyocr.Reader(["en"], gpu=False, verbose=False, **model_kwargs)
             print(f"[ocr-worker] EasyOCR ready (CPU) in {time.perf_counter()-t0:.1f}s")
 
         while not self._stop.is_set():
@@ -224,32 +257,95 @@ class OcrWorker:
                 if w != 1920 or h != 1080:
                     print(f"[{ts}] WARNING: frame {w}×{h}, ROIs assume 1920×1080")
 
-            # 3. Crop ROI(s)
-            tasks = []
-            for title, x, y, rw, rh in _TELE_ROIS:
-                x1, y1 = max(0, min(x, w)),      max(0, min(y, h))
-                x2, y2 = max(0, min(x + rw, w)), max(0, min(y + rh, h))
-                roi = frame[y1:y2, x1:x2]
-                if roi.size == 0:
-                    continue
-                proc, rtkw = _preprocess(roi, title)
-                tasks.append((reader, title, proc, rtkw))
+            # 3. Crop the single telemetry ROI and preprocess
+            _title, _rx, _ry, _rw, _rh = _TELE_ROIS[0]
+            x1 = max(0, min(_rx,        w));  x2 = max(0, min(_rx + _rw, w))
+            y1 = max(0, min(_ry,        h));  y2 = max(0, min(_ry + _rh, h))
+            roi = frame[y1:y2, x1:x2]
+            if roi.size == 0:
+                continue
+            proc, rtkw = _preprocess(roi, _title)
 
-            # 4. OCR
+            # CRAFT (detect) needs a BGR image; CRNN (recognize) uses grayscale.
+            # Our preprocessed `proc` is already grayscale — convert once per cycle.
+            img_grey = proc
+            img_bgr  = cv2.cvtColor(proc, cv2.COLOR_GRAY2BGR)
+
+            # 4. OCR — CRAFT/CRNN split
+            #
+            # Strategy: CRAFT finds text bounding-box positions; for a fixed OSD
+            # overlay those positions are stable across frames.  We cache them and
+            # only re-run CRAFT every _CRAFT_INTERVAL frames.  CRNN recognition
+            # runs every frame on the current image content using the cached boxes.
+            #
+            #   Full cycle  (CRAFT + CRNN): ~2 s   (every _CRAFT_INTERVAL frames)
+            #   Cache cycle (CRNN only)   : ~0.4 s  (all other frames)
+            #   Average latency @ interval=5:  (2 + 0.4×4) / 5 ≈ 0.72 s
             t_ocr_start = time.perf_counter()
-            ocr_outputs = [_ocr_single(t) for t in tasks]
-            t_ocr_end   = time.perf_counter()
+
+            # 4a. CRAFT detection
+            need_craft = (self._bbox_cache is None or
+                          self._bbox_age  >= _CRAFT_INTERVAL)
+            if need_craft:
+                t_craft = time.perf_counter()
+                try:
+                    h_lists, f_lists = reader.detect(
+                        img_bgr,
+                        reformat=False,
+                        width_ths=rtkw.get("width_ths",   0.5),
+                        ycenter_ths=rtkw.get("ycenter_ths", 0.5),
+                    )
+                    h_list = h_lists[0] if h_lists else []
+                    f_list = f_lists[0] if f_lists else []
+                except Exception as exc:
+                    print(f"[{ts}] [CRAFT] detect error: {exc}")
+                    h_list, f_list = [], []
+
+                craft_ms = int((time.perf_counter() - t_craft) * 1000)
+                if h_list or f_list:
+                    self._bbox_cache = (h_list, f_list)
+                    self._bbox_age   = 0
+                    print(f"[{ts}] [CRAFT] detect={craft_ms}ms  boxes={len(h_list)}")
+                else:
+                    # Detection found nothing — don't update cache; try again next frame
+                    print(f"[{ts}] [CRAFT] detect={craft_ms}ms  no boxes — skip")
+                    continue
+            else:
+                h_list, f_list = self._bbox_cache
+                self._bbox_age += 1
+
+            # 4b. CRNN recognition on cached bboxes + current image
+            t_crnn = time.perf_counter()
+            try:
+                ocr_results = reader.recognize(
+                    img_grey,
+                    h_list,
+                    f_list,
+                    decoder='greedy',
+                    batch_size=1,
+                    allowlist=rtkw.get("allowlist"),
+                    detail=1,
+                )
+            except Exception as exc:
+                print(f"[{ts}] [CRNN] recognize error: {exc}")
+                # Force CRAFT re-run next cycle in case the error is bbox-related
+                self._bbox_cache = None
+                continue
+
+            t_ocr_end = time.perf_counter()
+            crnn_ms   = int((t_ocr_end  - t_crnn)     * 1000)
+            total_ms  = int((t_ocr_end  - t_ocr_start) * 1000)
             ts = time.strftime('%H:%M:%S')
-            print(f"[{ts}] [OCR] {len(tasks)} ROI  {int((t_ocr_end-t_ocr_start)*1000)}ms")
+            mode = "craft+crnn" if need_craft else f"crnn(cached×{self._bbox_age})"
+            print(f"[{ts}] [OCR] {mode}  crnn={crnn_ms}ms  total={total_ms}ms")
 
             # 5. Collect tokens above confidence threshold
             roi_texts: dict[str, list[str]] = {}
-            for title, results in ocr_outputs:
-                tokens = " | ".join(f"{t!r}({c:.2f})" for _, t, c in results)
-                print(f"[{ts}] [RAW] {title}: {tokens or '(nothing)'}")
-                kept = [t for _, t, c in results if c >= _MIN_CONFIDENCE]
-                if kept:
-                    roi_texts[title] = kept
+            tokens = " | ".join(f"{t!r}({c:.2f})" for _, t, c in ocr_results)
+            print(f"[{ts}] [RAW] {_title}: {tokens or '(nothing)'}")
+            kept = [t for _, t, c in ocr_results if c >= _MIN_CONFIDENCE]
+            if kept:
+                roi_texts[_title] = kept
 
             if not roi_texts:
                 continue
@@ -278,20 +374,11 @@ class OcrWorker:
 
             ts      = time.strftime('%H:%M:%S')
             elapsed = time.perf_counter() - t_cycle
-            ocr_ms  = int((t_ocr_end - t_ocr_start) * 1000)
             print(
                 f"[{ts}] [CYCLE] total={int(elapsed*1000)}ms  "
-                f"drain={drained}f  ocr={ocr_ms}ms  "
+                f"drain={drained}f  ocr={total_ms}ms  crnn={crnn_ms}ms  "
                 f"send={int((t_push_end-t_push_start)*1000)}ms"
             )
-
-            # Cooling pause: give the CPU at least (target - elapsed) seconds of
-            # rest before the next OCR cycle.  Prevents thermal throttling on
-            # laptops where back-to-back cycles cause 10-18s OCR spikes.
-            _TARGET_CYCLE = 3.0
-            rest = _TARGET_CYCLE - elapsed
-            if rest > 0.1:
-                self._stop.wait(timeout=rest)
 
     # ── Filter + moving average ───────────────────────────────────────────────
 

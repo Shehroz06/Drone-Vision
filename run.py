@@ -73,6 +73,11 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    # Required on Windows when the app is frozen with PyInstaller (--onedir or
+    # --onefile).  Must be called before any other code in the main block.
+    import multiprocessing
+    multiprocessing.freeze_support()
+
     args = _parse_args()
 
     # Apply RTSP URL override before any module imports so that config/settings.py

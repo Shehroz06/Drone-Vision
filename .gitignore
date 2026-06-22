@@ -1,10 +1,45 @@
-.env
-logs/*.log
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*.pyd
+*.egg-info/
+*.egg
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Secrets / environment ─────────────────────────────────────────────────────
+.env
+# .env.example is intentionally tracked — it is a template with no real secrets
+
+# ── Build artifacts ───────────────────────────────────────────────────────────
 dist/
 build/
 *.spec.bak
-.venv/
+# rtsp_vision.spec and prepare_models.py are intentionally tracked
+
+# ── Runtime config override ───────────────────────────────────────────────────
+# Users may place config.yaml next to the exe/run.py to override defaults.
+# assets/config_default.yaml is the tracked default and must not be ignored.
+config.yaml
+config.json
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+logs/
+*.log
+
+# ── Map tiles (downloaded/cached at runtime — too large to version) ───────────
+tiles/
+
+# ── EasyOCR model weights (populated by prepare_models.py, ~110 MB) ──────────
+easyocr_models/
+
+# ── Scratch / test frames ─────────────────────────────────────────────────────
+frame.jpg
+
+# ── Tool / IDE ────────────────────────────────────────────────────────────────
 .claude/
+.DS_Store
+Thumbs.db

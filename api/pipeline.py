@@ -283,7 +283,7 @@ class PipelineManager:
             now = time.monotonic()
             if self._lat is not None and now - self._last_tele_log_ts >= 1.0:
                 self._last_tele_log_ts = now
-                print(f"[pipeline] lat={self._lat:.6f}  lon={self._lon:.6f}")
+                print(f"[pipeline] lat={self._lat:.7f}  lon={self._lon:.7f}")
 
             # ── 6. Performance metrics ───────────────────────────────────────
             now = time.monotonic()
