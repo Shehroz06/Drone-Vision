@@ -318,10 +318,9 @@ class RTSPStream:
         prints a Telemetry summary line.  All values are read-only; nothing
         is modified.
 
-        Expected result for a plain RTSP/H.264 stream via FFmpeg:
-            lat=None  lon=None  speed=None  altitude=None
-        OpenCV's VideoCapture does not surface GPS, KLV, or ONVIF metadata.
-        Telemetry must come from a parallel source (MAVLink, serial, etc.).
+        Logs stream properties (resolution, FPS, backend) on first connect.
+        OpenCV's VideoCapture does not surface GPS/KLV metadata — telemetry
+        comes exclusively from the OCR worker.
         """
         # OpenCV does not have CAP_PROP constants for GPS/telemetry.
         # The closest properties that *might* carry side-data on exotic backends:
@@ -340,25 +339,11 @@ class RTSPStream:
             except Exception:
                 prop_values[name] = None
 
-        # Telemetry fields — not available from OpenCV's VideoCapture API
-        lat      = None   # not exposed by cap.get()
-        lon      = None   # not exposed by cap.get()
-        speed    = None   # not exposed by cap.get()
-        altitude = None   # not exposed by cap.get()
-
-        print(
-            f"[stream] Telemetry: lat={lat}  lon={lon}  "
-            f"speed={speed}  altitude={altitude}"
-        )
         print(
             f"[stream] Stream props: "
             + "  ".join(f"{k}={v}" for k, v in prop_values.items())
         )
-        logger.info(
-            "Telemetry probe — lat=%s  lon=%s  speed=%s  altitude=%s  "
-            "stream_props=%s",
-            lat, lon, speed, altitude, prop_values,
-        )
+        logger.info("Stream props: %s", prop_values)
 
     def _release_cap(self) -> None:
         with self._cap_lock:

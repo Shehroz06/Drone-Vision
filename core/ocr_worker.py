@@ -27,11 +27,12 @@ _TELE_ROIS = [
 ]
 
 # ── Timing ────────────────────────────────────────────────────────────────────
-_RECONNECT_DELAY = 3.0
-_FRESH_THRESHOLD = 0.020  # grab() ≥ this seconds → live frame (not buffered)
+_RECONNECT_DELAY  = 3.0
+_FRESH_THRESHOLD  = 0.020  # grab() ≥ this seconds → live frame (not buffered)
+_MAX_DRAIN        = 200    # cap buffered-frame drain; prevents OCR stall after large bursts
 
 # ── OCR ───────────────────────────────────────────────────────────────────────
-_MIN_CONFIDENCE    = 0.35
+_MIN_CONFIDENCE    = 0.20
 _LON_LAT_ALLOWLIST = '0123456789. LONATlonat'
 
 # ── Sanity filter ─────────────────────────────────────────────────────────────
@@ -41,12 +42,18 @@ _FIELD_RANGES: dict[str, tuple[float, float]] = {
 }
 
 _MAX_DELTA: dict[str, float] = {
-    "lat": 0.005,
-    "lon": 0.005,
+    "lat": 0.010,
+    "lon": 0.010,
 }
 
 _MA_WINDOW    = 5
 _DELTA_WARMUP = 1
+# Sliding-window reset: if the last _REJECT_RESET rejected values for a field all
+# fall within _REJECT_CLUSTER_TOL of each other, the filter seeded on a wrong value
+# and the new cluster IS the real location — reset and accept it.
+# Random OCR garbage spans tens of degrees; a real stuck-seed spans < 0.02°.
+_REJECT_RESET       = 5
+_REJECT_CLUSTER_TOL = 0.02
 
 
 # ── Image preprocessing ───────────────────────────────────────────────────────
@@ -55,8 +62,7 @@ def _preprocess(roi: np.ndarray, roi_title: str) -> tuple[np.ndarray, dict]:
     """Return (processed_image, readtext_kwargs) tuned per ROI type."""
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     if "LAT" in roi_title:
-        _, bright = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
-        bright = cv2.dilate(bright, np.ones((2, 2), np.uint8), iterations=1)
+        _, bright = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
         proc = cv2.bitwise_not(bright)
         kwargs = {
             "allowlist":   _LON_LAT_ALLOWLIST,
@@ -72,7 +78,7 @@ def _preprocess(roi: np.ndarray, roi_title: str) -> tuple[np.ndarray, dict]:
 def _ocr_single(args: tuple) -> tuple[str, list]:
     """Run readtext on one pre-processed ROI."""
     reader, title, proc, rtkw = args
-    results = reader.readtext(proc, detail=1, batch_size=4, **rtkw)
+    results = reader.readtext(proc, detail=1, batch_size=1, decoder='greedy', **rtkw)
     return title, results
 
 
@@ -101,9 +107,15 @@ class OcrWorker:
         self._ma_buffers: dict[str, deque] = {
             k: deque(maxlen=_MA_WINDOW) for k in _FIELD_RANGES
         }
-        self._last_valid: dict[str, Optional[float]] = {k: None for k in _FIELD_RANGES}
-        self._accepted:   dict[str, int]             = {k: 0    for k in _FIELD_RANGES}
-        self._last_pushed: Optional[dict]            = None
+        self._last_valid:     dict[str, Optional[float]] = {k: None for k in _FIELD_RANGES}
+        self._accepted:       dict[str, int]             = {k: 0    for k in _FIELD_RANGES}
+        self._consec_rejects: dict[str, int]             = {k: 0    for k in _FIELD_RANGES}
+        # Sliding window of rejected values — used to detect a stable new location
+        # vs scattered OCR garbage before deciding to reset the anchor.
+        self._rejected_vals: dict[str, deque] = {
+            k: deque(maxlen=_REJECT_RESET) for k in _FIELD_RANGES
+        }
+        self._last_pushed: Optional[dict] = None
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -123,15 +135,24 @@ class OcrWorker:
     # ── Filter state reset ────────────────────────────────────────────────────
 
     def _reset_filter_state(self) -> None:
-        self._ma_buffers  = {k: deque(maxlen=_MA_WINDOW) for k in _FIELD_RANGES}
-        self._last_valid  = {k: None for k in _FIELD_RANGES}
-        self._accepted    = {k: 0    for k in _FIELD_RANGES}
-        self._last_pushed = None
+        self._ma_buffers     = {k: deque(maxlen=_MA_WINDOW) for k in _FIELD_RANGES}
+        self._last_valid     = {k: None for k in _FIELD_RANGES}
+        self._accepted       = {k: 0    for k in _FIELD_RANGES}
+        self._consec_rejects = {k: 0    for k in _FIELD_RANGES}
+        self._rejected_vals  = {k: deque(maxlen=_REJECT_RESET) for k in _FIELD_RANGES}
+        self._last_pushed    = None
 
     # ── Worker thread ─────────────────────────────────────────────────────────
 
     def _run(self) -> None:
+        import torch
         import easyocr
+
+        # Limit PyTorch to 4 threads.  Using all cores causes sustained thermal
+        # throttling on laptops — the first OCR call is 2s then spikes to 18s as
+        # the CPU overheats.  4 threads keeps clock speed stable.
+        torch.set_num_threads(4)
+        torch.set_num_interop_threads(1)
 
         print("[ocr-worker] Loading EasyOCR model…")
         t0 = time.perf_counter()
@@ -174,14 +195,14 @@ class OcrWorker:
             t_cycle = time.perf_counter()
             ts      = time.strftime('%H:%M:%S')
 
-            # 1. Drain buffered frames to the live edge
+            # 1. Drain buffered frames to the live edge (capped at _MAX_DRAIN)
             drained = 0
             while not self._stop.is_set():
                 t0 = time.perf_counter()
                 if not cap.grab():
                     print(f"[{ts}] [RTSP] grab() failed — reconnecting.")
                     return
-                if time.perf_counter() - t0 >= _FRESH_THRESHOLD:
+                if time.perf_counter() - t0 >= _FRESH_THRESHOLD or drained >= _MAX_DRAIN:
                     break
                 drained += 1
 
@@ -257,11 +278,20 @@ class OcrWorker:
 
             ts      = time.strftime('%H:%M:%S')
             elapsed = time.perf_counter() - t_cycle
+            ocr_ms  = int((t_ocr_end - t_ocr_start) * 1000)
             print(
                 f"[{ts}] [CYCLE] total={int(elapsed*1000)}ms  "
-                f"drain={drained}f  ocr={int((t_ocr_end-t_ocr_start)*1000)}ms  "
+                f"drain={drained}f  ocr={ocr_ms}ms  "
                 f"send={int((t_push_end-t_push_start)*1000)}ms"
             )
+
+            # Cooling pause: give the CPU at least (target - elapsed) seconds of
+            # rest before the next OCR cycle.  Prevents thermal throttling on
+            # laptops where back-to-back cycles cause 10-18s OCR spikes.
+            _TARGET_CYCLE = 3.0
+            rest = _TARGET_CYCLE - elapsed
+            if rest > 0.1:
+                self._stop.wait(timeout=rest)
 
     # ── Filter + moving average ───────────────────────────────────────────────
 
@@ -280,15 +310,46 @@ class OcrWorker:
                 if (prev is not None
                         and self._accepted[field] >= _DELTA_WARMUP
                         and abs(value - prev) > max_d):
-                    print(
-                        f"[FILTER] REJECT {field}={value:.5g} "
-                        f"delta={abs(value-prev):.5g} > {max_d} (prev={prev:.5g})"
+
+                    self._consec_rejects[field] += 1
+                    self._rejected_vals[field].append(value)
+
+                    # Check whether the rejected values cluster together.
+                    # If they do, the current anchor is the wrong seed and
+                    # the cluster is the real location → reset and accept.
+                    # If they scatter (random OCR garbage), keep rejecting.
+                    rvals = list(self._rejected_vals[field])
+                    clustered = (
+                        len(rvals) >= _REJECT_RESET
+                        and (max(rvals) - min(rvals)) <= _REJECT_CLUSTER_TOL
                     )
-                    value = None
+
+                    if clustered:
+                        new_anchor = sum(rvals) / len(rvals)
+                        print(
+                            f"[FILTER] RESET {field}: last {_REJECT_RESET} rejects "
+                            f"cluster near {new_anchor:.5g} "
+                            f"(span={max(rvals)-min(rvals):.4g}) "
+                            f"— was={prev:.5g} → accepting"
+                        )
+                        self._last_valid[field]     = None
+                        self._accepted[field]       = 0
+                        self._consec_rejects[field] = 0
+                        self._rejected_vals[field].clear()
+                        self._ma_buffers[field].clear()
+                        # value stays set → accepted by the block below
+                    else:
+                        print(
+                            f"[FILTER] REJECT {field}={value:.5g} "
+                            f"delta={abs(value-prev):.5g} > {max_d} "
+                            f"(prev={prev:.5g}) [{self._consec_rejects[field]}]"
+                        )
+                        value = None
 
             if value is not None:
-                self._last_valid[field] = value
-                self._accepted[field]  += 1
+                self._consec_rejects[field] = 0
+                self._last_valid[field]     = value
+                self._accepted[field]      += 1
                 self._ma_buffers[field].append(value)
 
             buf = self._ma_buffers[field]

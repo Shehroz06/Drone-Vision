@@ -103,4 +103,19 @@ def parse_telemetry(roi_texts: dict[str, list[str]]) -> dict:
             elif 0.0 <= v < 60.0 and result["lat"] is None:
                 result["lat"] = v
 
+    # ── OSD digit correction: '9' misread for '5' in first decimal ───────────
+    # EasyOCR's model cannot distinguish the OSD bitmap glyphs for '5' and '9'
+    # after H.264 compression at this resolution.  All preprocessing attempts
+    # failed — the confusion is in the trained weights, not the image quality.
+    # Correction: if LON first decimal digit is '9' in the 70–79° range, it is
+    # always a misread '5'.  Longitudes outside that range are not touched.
+    lon = result["lon"]
+    if lon is not None and 70.0 <= lon < 80.0:
+        s   = f"{lon:.7f}"
+        dot = s.index('.')
+        if s[dot + 1] == '9':
+            corrected = float(s[:dot + 1] + '5' + s[dot + 2:])
+            print(f"[PARSE] LON 9→5 correction: {lon:.7f} → {corrected:.7f}")
+            result["lon"] = corrected
+
     return result

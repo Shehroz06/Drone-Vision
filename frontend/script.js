@@ -74,9 +74,6 @@ _posMarker.setOpacity(0);   // hidden until first real data arrives
 
 // Pan only when the drone moves more than this distance (degrees ~1 km)
 const _PAN_THRESHOLD_DEG  = 0.005;
-// Reject GPS jumps larger than this between consecutive readings (degrees ~1.1 km).
-// Matches the Python-side _MAX_DELTA["lat/lon"] = 0.005 * 2 with some margin.
-const _MAX_JUMP_DEG        = 0.01;
 
 let _lastDrawLat = null;
 let _lastDrawLon = null;
@@ -84,13 +81,6 @@ const _pathCoords = [];   // accumulates every accepted [lat, lon]
 
 function draw(lat, lon) {
   if (lat == null || lon == null) return;
-
-  // Outlier rejection: ignore implausible jumps
-  if (_lastDrawLat != null) {
-    const dLat = Math.abs(lat - _lastDrawLat);
-    const dLon = Math.abs(lon - _lastDrawLon);
-    if (dLat > _MAX_JUMP_DEG || dLon > _MAX_JUMP_DEG) return;
-  }
 
   _pathCoords.push([lat, lon]);
   _polyline.setLatLngs(_pathCoords);
