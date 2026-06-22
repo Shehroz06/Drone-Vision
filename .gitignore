@@ -1,0 +1,10 @@
+.env
+logs/*.log
+__pycache__/
+*.pyc
+*.pyo
+dist/
+build/
+*.spec.bak
+.venv/
+.claude/

@@ -1,0 +1,38 @@
+# -----------------------------------------------------------------------
+# RTSP Vision — Default Configuration
+# Copy this file to config.yaml next to the .exe to override defaults.
+# All fields are optional; missing fields fall back to these values.
+# -----------------------------------------------------------------------
+
+# RTSP stream URL.
+# Credentials can be embedded directly: rtsp://user:pass@host:port/path
+# They will be masked (***) in log output.
+rtsp_url: "rtsp://127.0.0.1:8554/drone"
+
+# Capture resolution sent to the camera via OpenCV.
+# If the camera does not support the requested resolution,
+# OpenCV will use the nearest available size.
+frame_width: 1920
+frame_height: 1080
+
+# Maximum number of frames held in the buffer between capture and processing.
+# 1 = minimum latency: every push evicts the previous frame, so the pipeline
+#     always processes the most recently captured frame. Drop rate will be
+#     near 100% (intentional — we care about freshness, not completeness).
+# Memory cost: ~6.2 MB per frame at 1920×1080 BGR.
+max_queue_size: 1
+
+# Logging verbosity written to app.log and the console.
+# Options: DEBUG  INFO  WARNING  ERROR  CRITICAL
+log_level: INFO
+
+# Base delay in seconds between RTSP reconnect attempts.
+# Actual delay uses exponential backoff: base × 2^(attempt-1), capped at base × 8.
+# Example with base=5: 5 s, 10 s, 20 s, 40 s (ceiling).
+reconnect_delay: 5
+
+# Maximum capture frame rate (frames per second).
+# 0.0 = unlimited — the stream runs as fast as the camera delivers frames.
+# 30.0 keeps the producer inside what the pipeline worker can consume at
+# 1920×1080 (Otsu+findContours ~20 ms/frame → ~50 FPS max consumer speed).
+fps_limit: 30.0
