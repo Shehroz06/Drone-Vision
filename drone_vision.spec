@@ -1,11 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 #
-# PyInstaller spec for rtsp-vision (Windows, --onedir)
+# PyInstaller spec for drone-vision (Windows, --onedir)
 #
 # Build command (run from project root on a Windows machine):
-#   pyinstaller rtsp_vision.spec
+#   pyinstaller drone_vision.spec
 #
-# Output: dist\rtsp-vision\rtsp-vision.exe  (+ sibling DLLs and data)
+# Output: dist\drone-vision\drone-vision.exe  (+ sibling DLLs and data)
 
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_all
 
@@ -84,7 +84,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,   # onedir: binaries go in COLLECT below
-    name='rtsp-vision',
+    name='drone-vision',
     debug=False,
     strip=False,
     upx=False,               # UPX corrupts some torch DLLs — keep off
@@ -99,5 +99,5 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=False,
-    name='rtsp-vision',
+    name='drone-vision',
 )

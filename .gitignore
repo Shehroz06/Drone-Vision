@@ -18,7 +18,7 @@ env/
 dist/
 build/
 *.spec.bak
-# rtsp_vision.spec and prepare_models.py are intentionally tracked
+# drone_vision.spec and prepare_models.py are intentionally tracked
 
 # ── Runtime config override ───────────────────────────────────────────────────
 # Users may place config.yaml next to the exe/run.py to override defaults.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-RTSP Vision — single-command launcher.
+Drone Vision — single-command launcher.
 
 Starts the FastAPI server (which owns the full processing pipeline and
 serves the frontend).  The only required input is the RTSP stream URL.
@@ -34,7 +34,7 @@ import sys
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="RTSP Vision — real-time path visualisation server.",
+        description="Drone Vision — real-time path visualisation server.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -91,7 +91,7 @@ def main() -> None:
         print("ERROR: uvicorn is not installed.  Run:  pip install -r requirements.txt")
         sys.exit(1)
 
-    print(f"\n  RTSP Vision starting on  http://{args.host}:{args.port}")
+    print(f"\n  Drone Vision starting on  http://{args.host}:{args.port}")
     print(f"  Frontend map:            http://localhost:{args.port}")
     print(f"  API docs:                http://localhost:{args.port}/docs")
     print(f"  Pipeline health:         http://localhost:{args.port}/status\n")

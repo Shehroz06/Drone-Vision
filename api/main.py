@@ -1,5 +1,5 @@
 """
-RTSP Vision — FastAPI Backend
+Drone Vision — FastAPI Backend
 ==============================
 
 Single entry point for the API server.  Owns the full pipeline lifecycle:
@@ -130,7 +130,7 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
-    title="RTSP Vision API",
+    title="Drone Vision API",
     description="Real-time path data from the RTSP processing pipeline.",
     version="1.0.0",
     lifespan=lifespan,
@@ -357,7 +357,7 @@ async def get_tile(z: int, x: int, y: int):
             resp = _requests.get(
                 url,
                 headers={
-                    "User-Agent": "rtsp-vision-tilecache/1.0",
+                    "User-Agent": "drone-vision-tilecache/1.0",
                     "Accept":     "image/png",
                 },
                 timeout=10,

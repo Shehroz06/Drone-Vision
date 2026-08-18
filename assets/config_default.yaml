@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------
-# RTSP Vision — Default Configuration
+# Drone Vision — Default Configuration
 # Copy this file to config.yaml next to the .exe to override defaults.
 # All fields are optional; missing fields fall back to these values.
 # -----------------------------------------------------------------------

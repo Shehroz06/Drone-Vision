@@ -9,7 +9,7 @@ Downloads:
     craft_mlt_25k.pth   (~90 MB) — CRAFT text detection
     english_g2.pth      (~17 MB) — English CRNN recognition
 
-Output:  easyocr_models/   (sibling of this script, bundled by rtsp_vision.spec)
+Output:  easyocr_models/   (sibling of this script, bundled by drone_vision.spec)
 """
 
 from pathlib import Path
